@@ -2,23 +2,71 @@ import { env, createExecutionContext, waitOnExecutionContext, SELF } from 'cloud
 import { describe, it, expect } from 'vitest';
 import worker from '../src/index';
 
-// For now, you'll need to do something like this to get a correctly-typed
-// `Request` to pass to `worker.fetch()`.
 const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 
-describe('Hello World worker', () => {
-	it('responds with Hello World! (unit style)', async () => {
-		const request = new IncomingRequest('http://example.com');
-		// Create an empty context to pass to `worker.fetch()`.
-		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, env, ctx);
-		// Wait for all `Promise`s passed to `ctx.waitUntil()` to settle before running test assertions
-		await waitOnExecutionContext(ctx);
-		expect(await response.text()).toMatchInlineSnapshot(`"Hello World!"`);
+describe('Queue Test Worker', () => {
+	describe('fetch handler', () => {
+		it('returns usage info on GET /', async () => {
+			const response = await SELF.fetch('https://example.com/');
+			expect(response.status).toBe(200);
+			const text = await response.text();
+			expect(text).toContain('Queue Test Worker');
+			expect(text).toContain('/send');
+		});
+
+		it('sends a ping message on GET /send', async () => {
+			const response = await SELF.fetch('https://example.com/send');
+			expect(response.status).toBe(200);
+			const json = await response.json<{ success: boolean; message: string }>();
+			expect(json.success).toBe(true);
+			expect(json.message).toBe('Ping sent to queue');
+		});
+
+		it('sends a single message on POST /send', async () => {
+			const response = await SELF.fetch('https://example.com/send', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ data: 'hello' }),
+			});
+			expect(response.status).toBe(200);
+			const json = await response.json<{ success: boolean; messageCount: number }>();
+			expect(json.success).toBe(true);
+			expect(json.messageCount).toBe(1);
+		});
+
+		it('sends a batch of messages on POST /send', async () => {
+			const response = await SELF.fetch('https://example.com/send', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ messages: [{ id: 1 }, { id: 2 }, { id: 3 }] }),
+			});
+			expect(response.status).toBe(200);
+			const json = await response.json<{ success: boolean; messageCount: number }>();
+			expect(json.success).toBe(true);
+			expect(json.messageCount).toBe(3);
+		});
 	});
 
-	it('responds with Hello World! (integration style)', async () => {
-		const response = await SELF.fetch('https://example.com');
-		expect(await response.text()).toMatchInlineSnapshot(`"Hello World!"`);
+	describe('queue consumer', () => {
+		it('acknowledges all messages in a batch', async () => {
+			const acks: string[] = [];
+			const mockMessages = [
+				{ id: 'msg-1', timestamp: new Date(), attempts: 1, body: { type: 'test', value: 1 }, ack: () => acks.push('msg-1'), retry: () => {} },
+				{ id: 'msg-2', timestamp: new Date(), attempts: 1, body: { type: 'test', value: 2 }, ack: () => acks.push('msg-2'), retry: () => {} },
+			];
+
+			const mockBatch = {
+				queue: 'queue-test-queue',
+				messages: mockMessages,
+				ackAll: () => {},
+				retryAll: () => {},
+			} as unknown as MessageBatch;
+
+			const ctx = createExecutionContext();
+			await worker.queue!(mockBatch, env, ctx);
+			await waitOnExecutionContext(ctx);
+
+			expect(acks).toEqual(['msg-1', 'msg-2']);
+		});
 	});
 });
